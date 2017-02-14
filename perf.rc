@@ -1,0 +1,180 @@
+###########################################################################
+#   Copyright 2016 IBM Corp.
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+############################################################################
+
+# number of hypervisors
+HOSTS=50
+
+# percentage of hosting overlaps
+#   0%: no overlap, each network is hosted by a (random) single host
+#  50%: half overlap, each network is hosted by (random) half of the hosts
+# 100%: full overlap, each network is hosted by every host
+#   n%: partial overlap, each network is hosted by (random) max(1, ceil(HOSTS * n / 100)) hosts
+OVERLAP=0
+
+PORTS_PER_HOST=20
+PORTS_PER_NET_PER_HOST=1
+
+# Total number of logical networks
+# overlap > 0 ? ceil( total ports * overlap ) : total ports / ports per host
+NETS=$(( OVERLAP ? (100 * PORTS_PER_HOST/PORTS_PER_NET_PER_HOST + OVERLAP - 1)/OVERLAP : HOSTS * PORTS_PER_HOST / PORTS_PER_NET_PER_HOST ))
+
+# number of hot ports to be created on hot test
+HOT_PORTS=200
+
+ACTIVE_CPU=4-55
+SB_CPU=4
+NB_CPU=5
+HV_CPU=6-55
+
+function die()
+{
+   echo "$@"
+   exit 1
+}
+
+[[ $((PORTS_PER_NET_PER_HOST * (PORTS_PER_HOST/PORTS_PER_NET_PER_HOST))) == $PORTS_PER_HOST ]] || die "bad inputs, ports per host per net ($PORTS_PER_NET_PER_HOST) must divide ports per host ($PORTS_PER_HOST)"
+
+# pin <pid> <cpu>
+function pin()
+{
+    taskset --pid -c $2 `cat $1` > /dev/null || die "Failed pinning $1 to $2"
+}
+
+# number of seconds to measure steady state load
+REFERENCE_PERIOD=1
+COOL_DOWN_PERIOD=1
+
+function record_reference()
+{
+    perf record -q -o ${1}/perf.data.reference.${2} -a -- /bin/sleep $REFERENCE_PERIOD
+}
+
+function report_reference()
+{
+    perf report -f -i ${1}/perf.data.reference.${2} 2> /dev/null | awk '/Event count/{ print $5 }'
+}
+
+function record_command()
+{
+    dir=$1
+    stage=$2
+    shift 2
+    perf record -q -o ${dir}/perf.data.command.${stage} -a -- "$@"
+}
+
+function report_command()
+{
+    perf report -f -i ${1}/perf.data.command.${2} 2> /dev/null | awk '/Event count/{ print $5 }'
+}
+
+function report_command_cpu()
+{
+    dir=$1
+    stage=$2
+    shift 2
+    perf report -C "$@" -f -i ${dir}/perf.data.command.${stage} 2> /dev/null | awk '/Event count/{ print $5 }'
+}
+
+declare -A _net2hosts
+
+function assign_net_hosts()
+{
+    nhosts=$(( (HOSTS * OVERLAP + 99)/100 ))
+    nhosts=$((nhosts < 1 ? 1 : nhosts))
+
+    for i in `seq $NETS`; do
+        [ -e perf/tmp/rand${i} ] || dd if=/dev/urandom of=perf/tmp/rand${i} bs=4k count=1 2> /dev/null
+        _net2hosts[$i]=$(seq $HOSTS | shuf --random-source=perf/tmp/rand${i} | head --lines=$nhosts)
+    done
+}
+
+function get_net_hosts()
+{
+    echo ${_net2hosts[$1]}
+}
+
+function get_host_nets()
+{
+    for i in `seq $NETS`; do
+        for host in `get_net_hosts $i`; do
+            if [ $1 == $host ]; then echo $i; fi
+        done
+    done
+}
+
+function get_cpu()
+{
+	echo `cat /proc/stat | grep "cpu$1 " | awk '{print $2}'`
+}
+
+# ARGS: cpu, current, last, cpu_last
+function compute_cpu()
+{
+    current=$2
+    last=$3
+    cpu_last=$4
+    cpu_current=`cat /proc/stat | grep "cpu$1 " | awk '{print $2}'`
+    CPU=`python -c 'print ("%.2f" % (float('$((cpu_current-cpu_last))')/int('$((current-last))')*100))'`
+    echo $current $cpu_current $CPU
+}
+
+function record_cpu()
+{
+    res=$(compute_cpu $NB_CPU `date +%s%2N` $nb_last $nb_cpu_last)
+    nb_cpu_last=`echo $res | awk '{print $2}'`
+    nb_last=`echo $res | awk '{print $1}'`
+    cpu=`echo $res | awk '{print $3}'`
+	echo $1" $cpu" >> nb_cpu.csv
+
+    res=$(compute_cpu $SB_CPU `date +%s%2N` $sb_last $sb_cpu_last)
+    sb_cpu_last=`echo $res | awk '{print $2}'`
+    sb_last=`echo $res | awk '{print $1}'`
+    cpu=`echo $res | awk '{print $3}'`
+	echo $1" $cpu" >> sb_cpu.csv
+
+	res=$(compute_cpu $first_host_cpu `date +%s%2N` $host_last $host_cpu_last)
+	host_cpu_last=`echo $res | awk '{print $2}'`
+    host_last=`echo $res | awk '{print $1}'`
+    cpu=`echo $res | awk '{print $3}'`
+	echo $1" $cpu" >> host1_cpu.csv
+}
+
+function init_cpu_var()
+{
+   start=`date +%s%2N`
+   last=$start
+   first_host_cpu=`echo $HV_CPU | awk -F\- '{print $1}'`
+   last_host_cpu=`echo $HV_CPU | awk -F\- '{print $2}'`
+   nb_cpu_last=$(get_cpu $NB_CPU)
+   nb_last=$last
+   sb_cpu_last=$(get_cpu $SB_CPU)
+   sb_last=$last
+   host_cpu_last=$(get_cpu $first_host_cpu)
+   host_last=$last
+   
+   rm -f nb_cpu.csv; touch nb_cpu.csv
+   rm -f sb_cpu.csv; touch sb_cpu.csv
+   rm -f host1_cpu.csv; touch host1_cpu.csv
+}
+
+function get_time()
+{
+    echo $((`date +%s%2N`-start)) 
+}
+
+PORTS=$((HOSTS*PORTS_PER_HOST))
+TEST_NAME+="hosts_${HOSTS}_nets_${NETS}_ports_${PORTS}_overlap_${OVERLAP}"
+BRANCH=`git rev-parse --abbrev-ref HEAD`
+RES_DIR=/root/lirans/test/result/$TEST_NAME/$BRANCH

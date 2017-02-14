@@ -1,0 +1,15 @@
+set boxwidth 0.9 absolute
+set style fill   solid 1.00 border lt -1
+set key inside right top vertical Right noreverse noenhanced autotitle nobox
+set style histogram clustered gap 1 title textcolor lt -1
+set style data histograms
+set xtics border in scale 0,0 nomirror rotate by -45  autojustify
+set xtics  norangelimit
+set xtics   ()
+set yrange [0:*]
+set title "SB cycles comparison"
+#set xlabel "Network spread over % of hosts (total hosts = 50)"
+set ylabel "Cycles count"
+set terminal pngcairo size 1000,1000
+set output 'histogram.png'
+plot 'result.csv' using 2:xtic(1) ti col, '' u 3 ti col

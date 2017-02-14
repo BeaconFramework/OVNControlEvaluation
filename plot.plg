@@ -1,0 +1,11 @@
+set size square
+ 
+set ylabel "CPU %"
+set xlabel "Total # of Ports"
+
+set yrange [0:100]
+
+set terminal pngcairo size 1000,1000
+set output 'output.png'
+
+plot filename using 1:2 with lines
